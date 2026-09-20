@@ -102,7 +102,7 @@ Read from `modeling_gemma4.py` (`Gemma4TextDecoderLayer`, `Gemma4TextRouter`,
   per llama.cpp's `is_moe_layer = ffn_gate_inp != nullptr`), and reuse
   `N_EXPERTS` / `N_ACTIVE_EXPERTS`.
 
-## Validation (MacBook Pro M3 Pro, 19 GB RAM, 1 node, CPU)
+## Validation (MacBook Pro M3 Pro, 19 GB RAM, CPU)
 
 `google/gemma-4-12B-it-qat-q4_0-gguf` converted with `converter/convert-gguf.py`
 (10,727,120,256 bytes: 4.0 GB F32 embedding + 6.7 GB Q4_0), tokenizer from the HF
@@ -130,6 +130,29 @@ machine has 19 GB RAM and was swapping (the process needs the 4 GB F32 embedding
 table + 6.7 GB Q4_0 weights + KV cache), so these are lower bounds. For reference,
 llama.cpp's `llama-simple` on the same GGUF on the same machine decoded at 0.9 to
 4.3 tokens/s under the same memory pressure.
+
+### Multi-node (localhost workers on the same Mac, root `--nthreads 4/3`, workers 2/1 threads)
+
+Same three greedy prompts, 48 generated tokens each, compared token by token with the
+1-node output (`dllama worker --port 999N` + root `--workers 127.0.0.1:9991 ...`). The
+full-attention layers replicate their single KV head on every node whenever the node
+count does not divide 1, so the replicated-K path (`loadAll` + `qHeadOffset`) runs in
+every multi-node configuration:
+
+| Nodes | Prompt 1 | Prompt 2 | Prompt 3 | generation tokens/s (per prompt) |
+|---|---|---|---|---|
+| 2 | 48/48 | 48/48 | 48/48 | 4.1 / 3.7 / 4.2 |
+| 4 | 35/48 (identical through the answer; diverges after the end-of-turn token) | 48/48 | 13/48 (" a brief explanation" vs " the reasons", both coherent) | 3.8 / 2.7 / 4.2 |
+| 8 | 48/48 | 48/48 | 48/48 | 0.3 (swapping) / 4.0 / 2.9 |
+
+The 4-node divergence is the known effect of dllama's Q80 node sync: every node
+quantizes its partial attention/FFN output to Q80 before the cross-node sum, so the
+residual stream differs by node count and greedy decoding flips near-tied tokens. The
+control with the existing Qwen3 0.6B q40 model on the same user text shows the same
+behaviour (1 vs 2 nodes: 70/70 identical; 1 vs 4 nodes: identical for 41 tokens, then
+" number" vs " natural"), and 8 nodes reproduce the 1-node Gemma output exactly, so
+the slicing itself is consistent. The per-token sync cost on localhost with 8 nodes was
+about 140 ms (2.8 MB sent / 3.6 MB received per token) versus 73 ms of compute.
 
 Converted files (not committed, `/models` is git-ignored):
 
