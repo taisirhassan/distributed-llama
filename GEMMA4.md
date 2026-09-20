@@ -134,8 +134,8 @@ llama.cpp's `llama-simple` on the same GGUF on the same machine decoded at 0.9 t
 Converted files (not committed, `/models` is git-ignored):
 
 ```
-models/gemma4_12b_it_q40/dllama_model_gemma4_12b_it_q40.m   10,727,120,256 bytes
-models/gemma4_12b_it_q40/dllama_tokenizer_gemma4_12b_it.t        4,155,012 bytes
+models/gemma4_12b_q40/dllama_model_gemma4_12b_q40.m   10,727,120,256 bytes
+models/gemma4_12b_q40/dllama_tokenizer_gemma4_12b_q40.t        4,155,012 bytes
 ```
 
 Reproduce (from the repository root, Python env with `gguf` and `numpy`):
@@ -146,9 +146,9 @@ make dllama dllama-api nn-cpu-test && ./nn-cpu-test          # 16 kernel tests
 # config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja (google/gemma-4-12B-it)
 python converter/convert-gguf.py <dir>/gemma-4-12b-it-qat-q4_0.gguf gemma4_12b_it
 python converter/convert-tokenizer-hf.py <dir> gemma4_12b_it
-mkdir -p models/gemma4_12b_it_q40 && mv dllama_model_gemma4_12b_it_q40.m dllama_tokenizer_gemma4_12b_it.t models/gemma4_12b_it_q40/
-./dllama inference --model models/gemma4_12b_it_q40/dllama_model_gemma4_12b_it_q40.m \
-  --tokenizer models/gemma4_12b_it_q40/dllama_tokenizer_gemma4_12b_it.t \
+mkdir -p models/gemma4_12b_q40 && mv dllama_model_gemma4_12b_it_q40.m models/gemma4_12b_q40/dllama_model_gemma4_12b_q40.m && mv dllama_tokenizer_gemma4_12b_it.t models/gemma4_12b_q40/dllama_tokenizer_gemma4_12b_q40.t
+./dllama inference --model models/gemma4_12b_q40/dllama_model_gemma4_12b_q40.m \
+  --tokenizer models/gemma4_12b_q40/dllama_tokenizer_gemma4_12b_q40.t \
   --buffer-float-type q80 --nthreads 8 --max-seq-len 512 --temperature 0 --steps 73 \
   --prompt "$(printf '<|turn>user\nWhat is the capital of France? Answer in one sentence.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>')"
 ```
