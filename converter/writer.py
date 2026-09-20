@@ -130,6 +130,13 @@ def writeHeader(file, params):
         'head_dim': 19,
         'norm_epsilon': 20,
         'moe_hidden_dim': 21,
+        'sliding_window': 22,
+        'full_att_interval': 23,
+        'rope_theta_swa': 24,
+        'rope_dims_full': 25,
+        'head_dim_full': 26,
+        'n_kv_heads_full': 27,
+        'final_logit_softcap': 28,
     }
     header = struct.pack('i', 0xA00ABCD)
 

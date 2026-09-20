@@ -88,6 +88,8 @@ const char *opCodeToString(NnOpCode code) {
     if (code == OP_SHIFT) return "SHIFT";
     if (code == OP_SOFTMAX) return "SOFTMAX";
     if (code == OP_MOE_GATE) return "MOE_GATE";
+    if (code == OP_MERGE_SET) return "MERGE_SET";
+    if (code == OP_SOFTCAP) return "SOFTCAP";
     throw std::invalid_argument("Unknown op code: " + std::to_string(code));
 }
 
@@ -242,17 +244,22 @@ NnColMatmulSlice sliceColMatmul(NnFloatType type, NnUint nNodes, NnUint n, NnUin
     return s;
 }
 
-NnRopeSlice sliceRope(NnRopeType type, NnUint qDim, NnUint kvDim, NnUint nKvHeads, NnUint nNodes, NnUint seqLen, NnUint headDim, float ropeTheta, NnUint nodeIndex) {
+NnRopeSlice sliceRope(NnRopeType type, NnUint qDim, NnUint kvDim, NnUint nKvHeads, NnUint nNodes, NnUint seqLen, NnUint headDim, float ropeTheta, NnUint nodeIndex, NnUint ropeDims) {
     NnRopeSlice s;
     assert(qDim >= kvDim);
     assert(qDim % nNodes == 0);
     assert(kvDim % nNodes == 0);
+    if (ropeDims == 0)
+        ropeDims = headDim;
+    assert(ropeDims <= headDim);
+    assert(ropeDims % 2 == 0);
 
     s.kvDim = kvDim;
     s.nKvHeads = nKvHeads;
     s.seqLen = seqLen;
     s.headDim = headDim;
     s.ropeTheta = ropeTheta;
+    s.ropeDims = ropeDims;
 
     s.qDim0 = qDim / nNodes;
     s.kvDim0 = kvDim / nNodes;
@@ -260,6 +267,7 @@ NnRopeSlice sliceRope(NnRopeType type, NnUint qDim, NnUint kvDim, NnUint nKvHead
     assert(s.kvDim0 % 2 == 0);
 
     if (type == ROPE_LLAMA || type == ROPE_LLAMA3_1) {
+        assert(ropeDims == headDim); // partial rotary is only implemented for the Falcon (NeoX) layout
         s.kvDimStart = s.kvDim0 * nodeIndex;
         s.qDimStart = s.qDim0 * nodeIndex;
         s.qDimEnd = s.qDimStart + s.qDim0;
@@ -359,16 +367,26 @@ static inline void fullfillRopeLlamaCache(const NnRopeOpConfig *config, float *c
 }
 
 static inline void fullfillRopeFalconCache(const NnRopeOpConfig *config, float *cache) {
+    // NeoX layout: pair (j, j + headDim/2) is rotated by angle pos * theta^(-2j/headDim).
+    // With partial rotary (ropeDims < headDim, e.g. Gemma 4 "proportional" rope) only the
+    // first ropeDims/2 pairs rotate; the exponent still uses the full headDim and the
+    // remaining pairs get the identity rotation (cos=1, sin=0).
     const float hs = (float)config->slice.headDim;
+    const NnUint halfDim = config->slice.headDim / 2;
+    const NnUint nRotated = config->slice.ropeDims / 2;
 
     for (NnUint pos = 0; pos < config->slice.seqLen; pos++) {
-        for (NnUint j = 0; j < config->slice.headDim / 2; j++) {
-            const float freq = 1.0f / powf(config->slice.ropeTheta, 2.0f * (float)(j / hs));
-            const float val = pos * freq;
-            const float fcr = cosf(val);
-            const float fci = sinf(val);
+        for (NnUint j = 0; j < halfDim; j++) {
+            float fcr = 1.0f;
+            float fci = 0.0f;
+            if (j < nRotated) {
+                const float freq = 1.0f / powf(config->slice.ropeTheta, 2.0f * (float)(j / hs));
+                const float val = pos * freq;
+                fcr = cosf(val);
+                fci = sinf(val);
+            }
             cache[pos * config->slice.headDim + j] = fcr;
-            cache[pos * config->slice.headDim + j + config->slice.headDim / 2] = fci;
+            cache[pos * config->slice.headDim + j + halfDim] = fci;
         }
     }
 }

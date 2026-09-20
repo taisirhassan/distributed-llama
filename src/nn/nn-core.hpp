@@ -60,6 +60,7 @@ typedef struct {
     NnUint nKvHeads;
     float ropeTheta;
     NnSize3D cacheSize;
+    NnUint ropeDims; // Number of rotated dims per head (partial rotary), == headDim for full rotary
 } NnRopeSlice;
 
 typedef struct {
@@ -88,6 +89,8 @@ enum NnOpCode {
     OP_SHIFT,
     OP_SOFTMAX,
     OP_MOE_GATE,
+    OP_MERGE_SET,
+    OP_SOFTCAP,
 };
 
 enum NnOpQuantType {
@@ -102,7 +105,7 @@ enum NnOpQuantType {
     Q80_F32_F32,
 };
 
-#define N_OP_CODES (OP_SHIFT + 1)
+#define N_OP_CODES (OP_SOFTCAP + 1)
 #define N_OP_QUANTS (Q80_F32_F32 + 1)
 
 enum NnPointerSource {
@@ -237,6 +240,9 @@ typedef struct {
     NnUint keyCacheBufferIndex;
     NnUint valueCacheBufferIndex;
     NnUint attBufferIndex;
+    NnUint slidingWindow; // 0 = full causal attention, otherwise position `pos` attends to `t` iff `pos - t < slidingWindow`
+    float scale; // Multiplier applied to q·k scores (1/sqrt(headDim) for Llama/Qwen, 1.0 for Gemma 4)
+    NnUint qHeadOffset; // Global index of this node's first q head when the KV cache holds all kv heads (replicated KV), 0 when the KV cache is sliced per node
 } NnMultiHeadAttOpConfig;
 
 typedef struct {
@@ -281,6 +287,14 @@ typedef struct {
     NnUint indexesBufferIndex;
 } NnMoeGateOpCodeConfig;
 
+typedef struct {
+    // empty; output = sum of the node slices in the input (no residual)
+} NnMergeSetOpCodeConfig;
+
+typedef struct {
+    float cap; // output = cap * tanh(input / cap)
+} NnSoftcapOpCodeConfig;
+
 // utility functions
 
 const char *opCodeToString(NnOpCode code);
@@ -318,7 +332,7 @@ public:
 NnKvCacheSlice sliceKvCache(NnUint kvDim, NnUint seqLen, NnUint nNodes);
 NnRowMatmulSlice sliceRowMatmul(NnFloatType type, NnUint nNodes, NnUint n, NnUint d);
 NnColMatmulSlice sliceColMatmul(NnFloatType type, NnUint nNodes, NnUint n, NnUint d);
-NnRopeSlice sliceRope(NnRopeType type, NnUint qDim, NnUint kvDim, NnUint nKvHeads, NnUint nNodes, NnUint seqLen, NnUint headDim, float ropeTheta, NnUint nodeIndex);
+NnRopeSlice sliceRope(NnRopeType type, NnUint qDim, NnUint kvDim, NnUint nKvHeads, NnUint nNodes, NnUint seqLen, NnUint headDim, float ropeTheta, NnUint nodeIndex, NnUint ropeDims = 0);
 NnMultiHeadAttSlice sliceMultiHeadAtt(NnUint nHeads, NnUint seqLen, NnUint nNodes, NnUint nBatches);
 
 // splitters

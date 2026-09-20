@@ -32,6 +32,7 @@ enum TokenizerHeaderKey {
     CHAT_STOP = 8, // Ignored
     N_EOS_TOKENS = 9,
     ADD_BOS = 10,
+    N_SPECIAL_TOKENS = 11, // Explicit list of special token ids (for vocabs where bosId does not split regular/special tokens)
 };
 
 class Tokenizer {
@@ -51,6 +52,7 @@ private:
 
 public:
     std::vector<int> eosTokenIds;
+    std::vector<int> specialTokenIds;
     unsigned int vocabSize;
     char **vocab;
     int bosId;
@@ -107,6 +109,7 @@ enum ChatTemplateType {
     TEMPLATE_LLAMA3 = 2,
     TEMPLATE_DEEP_SEEK3 = 3,
     TEMPLATE_CHATML = 4,
+    TEMPLATE_GEMMA4 = 5,
 };
 
 struct ChatItem {

@@ -753,33 +753,36 @@ static float dotProduct_F32(const float *a, const float *b, const unsigned int s
 static void multiheadAtt_F32(
     float *y, const float *q, float *att, float *keyCache, float *valueCache,
     const NnUint pos, const NnUint nHeads, const NnUint nHeads0, const NnUint nKvHeads, const NnUint kvDim0, const NnUint headDim, const NnUint seqLen,
-    const NnUint nThreads, const NnUint threadIndex) 
+    const NnUint slidingWindow, const float scale, const NnUint qHeadOffset,
+    const NnUint nThreads, const NnUint threadIndex)
 {
     SPLIT_THREADS(h0Start, h0End, nHeads0, nThreads, threadIndex);
     const NnUint kvMul = nHeads / nKvHeads;
-    const float headDimRoot = sqrtf(headDim);
+    // Sliding window: position `pos` attends to `t` iff `pos - t < slidingWindow` (HF `sliding_window_causal_mask`, llama.cpp LLAMA_SWA_TYPE_STANDARD)
+    const NnUint tStart = (slidingWindow > 0 && pos + 1 > slidingWindow) ? pos + 1 - slidingWindow : 0;
+    const NnUint nAtt = pos + 1 - tStart;
 
     for (NnUint h0 = h0Start; h0 < h0End; h0++) {
         const float *hQ = &q[h0 * headDim];
-        const NnUint headIndex = h0 / kvMul;
+        const NnUint headIndex = (qHeadOffset + h0) / kvMul;
         const float *hKc = &keyCache[headIndex * headDim];
         const float *hVc = &valueCache[headIndex * headDim];
         float *hAtt = &att[h0 * seqLen];
 
-        for (NnUint t = 0; t <= pos; t++) {
+        for (NnUint t = tStart; t <= pos; t++) {
             const float *posK = &hKc[t * kvDim0];
-            const float score = dotProduct_F32(hQ, posK, headDim) / headDimRoot;
-            hAtt[t] = score;
+            const float score = dotProduct_F32(hQ, posK, headDim) * scale;
+            hAtt[t - tStart] = score;
         }
 
-        softmax_F32(hAtt, pos + 1);
+        softmax_F32(hAtt, nAtt);
 
         float *hY = &y[h0 * headDim];
         std::memset(hY, 0, headDim * sizeof(float));
 
-        for (NnUint t = 0; t <= pos; t++) {
+        for (NnUint t = tStart; t <= pos; t++) {
             const float *posV = &hVc[t * kvDim0];
-            const float posA = hAtt[t];
+            const float posA = hAtt[t - tStart];
             for (int i = 0; i < headDim; i++) {
                 hY[i] += posA * posV[i];
             }
@@ -832,6 +835,31 @@ static void mul_Q80_F32(float *y, const float *x, const NnBlockQ80 *m, const NnU
     }
 }
 
+static void softcap_F32(float *output, const float *x, const float cap, const NnUint n, const NnUint nThreads, const NnUint threadIndex) {
+    SPLIT_THREADS(start, end, n, nThreads, threadIndex);
+    const float invCap = 1.0f / cap;
+    for (NnUint i = start; i < end; i++)
+        output[i] = cap * tanhf(x[i] * invCap);
+}
+
+static void set_F32(float *output, const float *x, const unsigned int n, const NnUint nThreads, const NnUint threadIndex) {
+    SPLIT_THREADS(start, end, n, nThreads, threadIndex);
+    if (end > start)
+        std::memcpy(&output[start], &x[start], (end - start) * sizeof(float));
+}
+
+static void set_Q80_F32(float *y, const NnBlockQ80 *x, const NnUint n, const NnUint nThreads, const NnUint threadIndex) {
+    const NnUint nBlocks = n / Q80_BLOCK_SIZE;
+    SPLIT_THREADS(start, end, nBlocks, nThreads, threadIndex);
+    for (NnUint i = start; i < end; i++) {
+        const NnBlockQ80 *xi = &x[i];
+        const float d = CONVERT_F16_TO_F32(xi->d);
+        float *yi = &y[i * Q80_BLOCK_SIZE];
+        for (NnUint j = 0; j < Q80_BLOCK_SIZE; j++)
+            yi[j] = d * xi->qs[j];
+    }
+}
+
 static void copy_UNK(NnByte *output, const NnByte *x, NnSize size, const NnUint nThreads, const NnUint threadIndex) {
     SPLIT_THREADS(start, end, size, nThreads, threadIndex);
     NnUint s = end - start;
@@ -869,10 +897,12 @@ static void ropeFalcon_F32(float* x, const float *cache, bool isQ, const NnUint 
     SPLIT_THREADS(h0s, h0e, nHeads0, nThreads, threadIndex);
 
     const float *posCache = &cache[pos * slice->headDim];
+    // Partial rotary: only the first ropeDims/2 pairs (j, j + headDim/2) are rotated
+    const unsigned int nRotated = slice->ropeDims / 2;
 
     for (unsigned int h = h0s; h < h0e; h++) {
         const unsigned int o = h * slice->headDim;
-        for (unsigned int j = 0; j < slice->headDim / 2; j++) {
+        for (unsigned int j = 0; j < nRotated; j++) {
             const float fcr0 = posCache[j];
             const float fci0 = posCache[j + slice->headDim / 2];
 
@@ -953,6 +983,50 @@ static void mergeAddForward_Q80_F32(NnUint nThreads, NnUint threadIndex, NnUint 
                 nThreads,
                 threadIndex);
         }
+    }
+}
+
+static void initMergeSetForward(NnCpuOpContext *context) {
+    assert(context->weightSize.nBytes == 0);
+    ASSERT_EQ(context->inputSize.x % context->outputSize.x, 0);
+    ASSERT_EQ(context->inputSize.y, context->nBatches);
+    ASSERT_EQ(context->outputSize.y, context->nBatches);
+    ASSERT_EQ(context->outputSize.floatType, F_32);
+}
+
+static void mergeSetForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+    const NnUint nSlices = context->inputSize.x / context->outputSize.x;
+
+    for (NnUint batchIndex = 0; batchIndex < batchSize; batchIndex++) {
+        float *output = (float *)context->output[batchIndex];
+        float *input = (float *)context->input[batchIndex];
+        for (NnUint sliceIndex = 0; sliceIndex < nSlices; sliceIndex++) {
+            float *i = &input[sliceIndex * context->outputSize.x];
+            if (sliceIndex == 0)
+                set_F32(output, i, context->outputSize.x, nThreads, threadIndex);
+            else
+                add_F32(output, i, context->outputSize.x, nThreads, threadIndex);
+        }
+        DEBUG_VECTOR(context, "output", output);
+    }
+}
+
+static void mergeSetForward_Q80_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+    assert(context->inputSize.floatType == F_Q80);
+    assert(context->outputSize.floatType == F_32);
+
+    const NnUint nSlices = context->inputSize.x / context->outputSize.x;
+    const NnUint xSize = context->outputSize.x / Q80_BLOCK_SIZE;
+    for (NnUint batchIndex = 0; batchIndex < batchSize; batchIndex++) {
+        float *output = (float *)context->output[batchIndex];
+        NnBlockQ80 *input = (NnBlockQ80 *)context->input[batchIndex];
+        for (NnUint sliceIndex = 0; sliceIndex < nSlices; sliceIndex++) {
+            if (sliceIndex == 0)
+                set_Q80_F32(output, &input[sliceIndex * xSize], context->outputSize.x, nThreads, threadIndex);
+            else
+                add_Q80_F32(output, &input[sliceIndex * xSize], context->outputSize.x, nThreads, threadIndex);
+        }
+        DEBUG_VECTOR(context, "output", output);
     }
 }
 
@@ -1275,11 +1349,13 @@ static void multiHeadAttForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnU
         DEBUG_VECTOR(context, "input", y);
         DEBUG_VECTOR(context, "q", q);
 
-        multiheadAtt_F32(y, q, 
+        multiheadAtt_F32(y, q,
             &att[batchIndex * config->nHeads0 * config->seqLen],
             keyCache, valueCache, pos,
             config->nHeads, config->nHeads0,
-            config->nKvHeads, config->kvDim0, config->headDim, config->seqLen, nThreads, threadIndex);
+            config->nKvHeads, config->kvDim0, config->headDim, config->seqLen,
+            config->slidingWindow, config->scale, config->qHeadOffset,
+            nThreads, threadIndex);
 
         DEBUG_VECTOR(context, "output", y);
     }
@@ -1321,6 +1397,32 @@ static void scaleForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint bat
             const float *i = (float *)context->input[index];
             float *o = (float *)context->output[index];
             scale_F32(i, o, s, context->inputSize.x, nThreads, threadIndex);
+        }
+    }
+}
+
+static void initSoftcapForward(NnCpuOpContext *context) {
+    const NnSoftcapOpCodeConfig *config = (NnSoftcapOpCodeConfig *)context->opConfig;
+    assert(context->weightSize.nBytes == 0);
+    assert(config->cap > 0.0f);
+    ASSERT_EQ(context->inputSize.x, context->outputSize.x);
+    ASSERT_EQ(context->inputSize.y, context->outputSize.y);
+    ASSERT_EQ(context->inputSize.z, context->outputSize.z);
+}
+
+static void softcapForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+    const NnSoftcapOpCodeConfig *config = (NnSoftcapOpCodeConfig *)context->opConfig;
+
+    for (NnUint z = 0u; z < context->inputSize.z; z++) {
+        for (NnUint y = 0u; y < batchSize; y++) {
+            const NnUint index = z * context->inputSize.y + y;
+            softcap_F32(
+                (float *)context->output[index],
+                (float *)context->input[index],
+                config->cap,
+                context->outputSize.x,
+                nThreads,
+                threadIndex);
         }
     }
 }
@@ -1534,6 +1636,10 @@ NnCpuOpForwardInit getCpuOpForwardInit(NnOpCode code, NnOpQuantType quantType) {
         return initRepeatZForward;
     if (code == OP_MOE_GATE)
         return initMoeGateForward;
+    if (code == OP_MERGE_SET)
+        return initMergeSetForward;
+    if (code == OP_SOFTCAP)
+        return initSoftcapForward;
     return nullptr;
 }
 
@@ -1595,6 +1701,13 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType) {
     }
     if (code == OP_MOE_GATE) {
         if (quantType == F32_F32_F32) return moeGateForward_F32_F32;
+    }
+    if (code == OP_MERGE_SET) {
+        if (quantType == F32_F32_F32) return mergeSetForward_F32_F32;
+        if (quantType == Q80_Q80_F32) return mergeSetForward_Q80_F32;
+    }
+    if (code == OP_SOFTCAP) {
+        if (quantType == F32_F32_F32) return softcapForward_F32_F32;
     }
     return nullptr;
 }

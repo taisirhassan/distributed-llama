@@ -84,6 +84,7 @@ Tokenizer::Tokenizer(const char* tokenizerPath)
         int version = -1;
         int chatTemplateLength = -1;
         int nEosTokens = 0;
+        int nSpecialTokens = 0;
         for (int i = 0; i < nKv; i += 2) {
             int key = buffer[i];
             int value = buffer[i + 1];
@@ -98,6 +99,7 @@ Tokenizer::Tokenizer(const char* tokenizerPath)
             else if (key == PAD_ID) {} // Ignored
             else if (key == N_EOS_TOKENS) nEosTokens = value;
             else if (key == ADD_BOS) addBos = value == 1;
+            else if (key == N_SPECIAL_TOKENS) nSpecialTokens = value;
             else {
                 throw std::runtime_error("Invalid tokenizer header key:" + std::to_string(key));
             }
@@ -118,6 +120,14 @@ Tokenizer::Tokenizer(const char* tokenizerPath)
                 if (fread(&eosTokenId, sizeof(int), 1, file) != 1)
                     throw std::runtime_error("Cannot read eos token id from tokenizer file");
                 eosTokenIds.push_back(eosTokenId);
+            }
+        }
+        if (nSpecialTokens > 0) {
+            int specialTokenId;
+            for (int i = 0; i < nSpecialTokens; i++) {
+                if (fread(&specialTokenId, sizeof(int), 1, file) != 1)
+                    throw std::runtime_error("Cannot read special token id from tokenizer file");
+                specialTokenIds.push_back(specialTokenId);
             }
         }
     } else {
@@ -145,20 +155,47 @@ Tokenizer::Tokenizer(const char* tokenizerPath)
         vocabLength[i] = length;
     }
 
-    // TODO: this is very unstable assumption that bosId splits regular and special vocab
-    regularVocabSize = bosId;
-    specialVocabSize = vocabSize - regularVocabSize;
+    if (specialTokenIds.size() > 0) {
+        // Explicit special token list: every other token is a regular token
+        std::vector<bool> isSpecial(vocabSize, false);
+        for (size_t i = 0; i < specialTokenIds.size(); i++) {
+            int id = specialTokenIds[i];
+            if (id < 0 || (unsigned int)id >= vocabSize)
+                throw std::runtime_error("Invalid special token id in tokenizer file");
+            isSpecial[id] = true;
+        }
+        specialVocabSize = specialTokenIds.size();
+        regularVocabSize = vocabSize - specialVocabSize;
 
-    regularVocab.reserve(regularVocabSize * 2);
-    for (int i = 0; i < regularVocabSize; i++) {
-        uint64_t h = calcStringHash(vocab[i]);
-        regularVocab[h].push_back(i);
-    }
+        regularVocab.reserve(regularVocabSize * 2);
+        for (unsigned int i = 0; i < vocabSize; i++) {
+            if (isSpecial[i])
+                continue;
+            uint64_t h = calcStringHash(vocab[i]);
+            regularVocab[h].push_back(i);
+        }
 
-    specialVocab = new TokenIndex[specialVocabSize];
-    for (int i = 0; i < specialVocabSize; i++) {
-        specialVocab[i].str = vocab[i + regularVocabSize];
-        specialVocab[i].id = i + regularVocabSize;
+        specialVocab = new TokenIndex[specialVocabSize];
+        for (unsigned int i = 0; i < specialVocabSize; i++) {
+            specialVocab[i].str = vocab[specialTokenIds[i]];
+            specialVocab[i].id = specialTokenIds[i];
+        }
+    } else {
+        // TODO: this is very unstable assumption that bosId splits regular and special vocab
+        regularVocabSize = bosId;
+        specialVocabSize = vocabSize - regularVocabSize;
+
+        regularVocab.reserve(regularVocabSize * 2);
+        for (int i = 0; i < regularVocabSize; i++) {
+            uint64_t h = calcStringHash(vocab[i]);
+            regularVocab[h].push_back(i);
+        }
+
+        specialVocab = new TokenIndex[specialVocabSize];
+        for (int i = 0; i < specialVocabSize; i++) {
+            specialVocab[i].str = vocab[i + regularVocabSize];
+            specialVocab[i].id = i + regularVocabSize;
+        }
     }
 
     strBufferSize = maxTokenLength * 2;
@@ -217,12 +254,15 @@ int Tokenizer::findRegularToken(char *piece) {
     if (it == regularVocab.end())
         return -1;
     const std::vector<int> &candidates = it->second;
+    // Several ids can carry the same bytes (e.g. a <0xXX> byte-fallback token and the text token of
+    // the same character); prefer the one with the highest score, ties go to the lowest id.
+    int bestId = -1;
     for (size_t i = 0; i < candidates.size(); i++) {
         int id = candidates[i];
-        if (strcmp(vocab[id], piece) == 0)
-            return id;
+        if (strcmp(vocab[id], piece) == 0 && (bestId == -1 || vocabScores[id] > vocabScores[bestId]))
+            bestId = id;
     }
-    return -1;
+    return bestId;
 }
 
 bool Tokenizer::isEos(int token) {
@@ -568,6 +608,7 @@ static const char *chatTemplateTypeToString(const ChatTemplateType type) {
     if (type == TEMPLATE_LLAMA3) return "llama3";
     if (type == TEMPLATE_DEEP_SEEK3) return "deepSeek3";
     if (type == TEMPLATE_CHATML) return "chatml";
+    if (type == TEMPLATE_GEMMA4) return "gemma4";
     return "unknown";
 }
 
@@ -585,6 +626,8 @@ ChatTemplateGenerator::ChatTemplateGenerator(const ChatTemplateType type, const 
             this->type = TEMPLATE_DEEP_SEEK3;
         } else if (strstr(chatTemplate, "<|im_start|>") != NULL) {
             this->type = TEMPLATE_CHATML;
+        } else if (strstr(chatTemplate, "<|turn>") != NULL) {
+            this->type = TEMPLATE_GEMMA4;
         } else {
             throw std::runtime_error("Not supported chat template");
         }
@@ -654,6 +697,22 @@ GeneratedChat ChatTemplateGenerator::generate(unsigned int nItems, ChatItem* ite
             if (appendGenerationPrompt)
                 buffer += "<|im_start|>assistant\n";
         }
+    } else if (type == TEMPLATE_GEMMA4) {
+        // Gemma 4 canonical chat template (thinking disabled): the assistant role is "model",
+        // turns are "<|turn>{role}\n{message}<turn|>\n" and the generation prompt carries an empty thinking channel.
+        for (unsigned int i = 0; i < nItems; i++) {
+            if (items[i].role == "system") {
+                buffer += "<|turn>system\n" + items[i].message + "<turn|>\n";
+            } else if (items[i].role == "user") {
+                buffer += "<|turn>user\n" + items[i].message + "<turn|>\n";
+            } else if (items[i].role == "assistant") {
+                buffer += "<|turn>model\n" + items[i].message + "<turn|>\n";
+            } else if (items[i].role == "tool") {
+                buffer += "<|turn>user\n<|tool_response>" + items[i].message + "<tool_response|><turn|>\n";
+            }
+        }
+        if (appendGenerationPrompt)
+            buffer += "<|turn>model\n<|channel>thought\n<channel|>";
     }
 
     const char *content = buffer.c_str();

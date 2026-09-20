@@ -28,6 +28,13 @@ enum LlmHeaderKey {
     HEAD_DIM = 19,
     NORM_EPSILON = 20,
     MOE_HIDDEN_DIM = 21,
+    SLIDING_WINDOW = 22, // Gemma 4: window of the sliding_attention layers (0 = none)
+    FULL_ATT_INTERVAL = 23, // Gemma 4: layer `l` is full_attention iff (l + 1) % interval == 0 (0 = all layers are full attention)
+    ROPE_THETA_SWA = 24, // Gemma 4: rope theta of the sliding layers (ROPE_THETA is the full-attention theta)
+    ROPE_DIMS_FULL = 25, // Gemma 4: rotated dims per head on full-attention layers (partial rotary), 0 = all
+    HEAD_DIM_FULL = 26, // Gemma 4: head dim of the full-attention layers (0 = HEAD_DIM)
+    N_KV_HEADS_FULL = 27, // Gemma 4: kv heads of the full-attention layers (0 = N_KV_HEADS)
+    FINAL_LOGIT_SOFTCAP = 28, // Gemma 4: logits = cap * tanh(logits / cap) (0 = none)
 };
 
 enum LlmHiddenAct {
@@ -39,6 +46,7 @@ enum LlmArchType {
     LLAMA = 0xABCD00,
     QWEN3 = 0xABCD01,
     QWEN3_MOE = 0xABCD02,
+    GEMMA4 = 0xABCD03,
 };
 
 typedef struct {
@@ -69,6 +77,17 @@ typedef struct {
     NnUint ropeScalingOrigMaxSeqLen;
     float normEpsilon;
 
+    // Gemma 4 (sliding/full attention layer types)
+    NnUint slidingWindow;
+    NnUint fullAttInterval;
+    float ropeThetaSwa;
+    NnUint ropeDimsFull;
+    NnUint headDimFull;
+    NnUint nKvHeadsFull;
+    NnUint qDimFull;
+    NnUint kvDimFull;
+    float finalLogitSoftcap;
+
     NnFloatType weightType;
     NnFloatType syncType;
 } LlmHeader;
@@ -85,6 +104,11 @@ typedef struct {
     NnColMatmulSlice w2Slice;
     NnRowMatmulSlice w3Slice;
     NnRowMatmulSlice wclsSlice;
+    // Gemma 4 full-attention layers (head dim / kv heads differ from the sliding layers)
+    NnRowMatmulSlice qSliceFull;
+    NnRowMatmulSlice kSliceFull;
+    NnColMatmulSlice woSliceFull;
+    NnSize3D qkRmsNormSizeFull;
     NnUint positionPipeIndex;
     NnUint tokenPipeIndex;
     NnUint xPipeIndex;
@@ -97,6 +121,7 @@ typedef struct {
 
 LlmHeader loadLlmHeader(const char* path, const unsigned int maxSeqLen, NnFloatType syncType);
 void printLlmHeader(LlmHeader *header);
+bool isLlmFullAttLayer(const LlmHeader *header, NnUint layerIndex);
 LlmNet buildLlmNet(LlmHeader *h, NnUint nNodes, NnUint nBatches);
 void releaseLlmNet(LlmNet *net);
 void loadLlmNetWeight(const char* path, LlmNet *net, NnRootWeightLoader *loader);

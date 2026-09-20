@@ -1,6 +1,6 @@
 import struct
 
-def writeTokenizer(file, tokens, scores, chatTemplate, bosId, addBos, eosTokens):
+def writeTokenizer(file, tokens, scores, chatTemplate, bosId, addBos, eosTokens, specialTokens = None):
     headerKeys = {
         'version': 0,
         'vocab_size': 1,
@@ -9,6 +9,7 @@ def writeTokenizer(file, tokens, scores, chatTemplate, bosId, addBos, eosTokens)
         'chat_template': 7,
         'n_eos_tokens': 9,
         'add_bos': 10,
+        'n_special_tokens': 11,
     }
     header = struct.pack('i', 0x567124)
 
@@ -24,6 +25,9 @@ def writeTokenizer(file, tokens, scores, chatTemplate, bosId, addBos, eosTokens)
         params['chat_template'] = len(chatTemplate)
     params['n_eos_tokens'] = len(eosTokens)
     params['add_bos'] = 1 if addBos else 0
+    if (specialTokens):
+        # Explicit special token ids; without this list the engine assumes ids >= bosId are special
+        params['n_special_tokens'] = len(specialTokens)
 
     data = b''
     for key in params:
@@ -49,6 +53,10 @@ def writeTokenizer(file, tokens, scores, chatTemplate, bosId, addBos, eosTokens)
 
     for eosToken in eosTokens:
         file.write(struct.pack('i', eosToken))
+
+    if (specialTokens):
+        for specialToken in specialTokens:
+            file.write(struct.pack('i', specialToken))
 
     for i in range(0, nTokens):
         size = len(tokens[i])

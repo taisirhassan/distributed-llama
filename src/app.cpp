@@ -18,6 +18,7 @@ static ChatTemplateType parseChatTemplateType(char *val) {
     if (std::strcmp(val, "llama2") == 0) return TEMPLATE_LLAMA2;
     if (std::strcmp(val, "llama3") == 0) return TEMPLATE_LLAMA3;
     if (std::strcmp(val, "deepSeek3") == 0) return TEMPLATE_DEEP_SEEK3;
+    if (std::strcmp(val, "gemma4") == 0) return TEMPLATE_GEMMA4;
     throw std::runtime_error("Invalid chat template type: " + std::string(val));
 }
 
@@ -238,6 +239,8 @@ void runInferenceApp(AppCliArgs *args, void (*handler)(AppInferenceContext *cont
         throw std::runtime_error("This version does not support more nodes than the number of KV heads in the model");
     if (header.weightType == F_Q40 && header.syncType != F_Q80)
         throw std::runtime_error("This version supports only Q40 weights with Q80 sync type");
+    if (header.archType == GEMMA4 && args->gpuIndex >= 0)
+        throw std::runtime_error("Gemma 4 is not supported on the Vulkan device yet (no shaders for MERGE_SET, SOFTCAP and GELU), run it on the CPU");
 
     Tokenizer tokenizer(args->tokenizerPath);
     if (args->info && tokenizer.vocabSize != header.vocabSize)
