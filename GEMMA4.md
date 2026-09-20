@@ -116,11 +116,50 @@ chat prompts, comparing generated tokens up to llama.cpp's end-of-turn:
 | "Write a haiku about the ocean." | 21 | 21/21 |
 | "List three prime numbers greater than 10 and explain briefly why they are prime." | 48 | 48/48 |
 
-Prompt tokenization is identical to HF `tokenizers` for these prompts. Throughput on
-this Mac with 8 threads: 4.7 tokens/s generation (211 ms/token), 12.3 tokens/s prompt
-evaluation; the machine was swapping (the F32 embedding table alone is 4 GB), so these
-numbers are a lower bound. `nn-cpu-test` covers the windowed attention, partial rotary
-rope, softcap, scalar multiply and merge-set kernels.
+Token-by-token match rate against llama.cpp: 77/77 generated tokens identical (100%)
+across the three prompts (the longest common prefix equals the full llama.cpp output in
+every case). Prompt tokenization is identical to HF `tokenizers` for these prompts
+(and for ASCII/code text in general; non-ASCII text falls back to byte tokens in
+dllama's encoder, see below). `dllama chat` with the built-in Gemma 4 template answers
+"Name three colors of the rainbow, comma separated." with "Red, orange, yellow".
+
+Throughput on this Mac (M3 Pro, 11 cores, 1 node, `--nthreads 8`, 128 generated
+tokens, `--max-seq-len 512`): 4.74 tokens/s generation (211 ms/token), 12.3 tokens/s
+prompt evaluation (nBatches 32). With `--nthreads 10` it drops to 2.0 tokens/s. The
+machine has 19 GB RAM and was swapping (the process needs the 4 GB F32 embedding
+table + 6.7 GB Q4_0 weights + KV cache), so these are lower bounds. For reference,
+llama.cpp's `llama-simple` on the same GGUF on the same machine decoded at 0.9 to
+4.3 tokens/s under the same memory pressure.
+
+Converted files (not committed, `/models` is git-ignored):
+
+```
+models/gemma4_12b_it_q40/dllama_model_gemma4_12b_it_q40.m   10,727,120,256 bytes
+models/gemma4_12b_it_q40/dllama_tokenizer_gemma4_12b_it.t        4,155,012 bytes
+```
+
+Reproduce (from the repository root, Python env with `gguf` and `numpy`):
+
+```sh
+make dllama dllama-api nn-cpu-test && ./nn-cpu-test          # 16 kernel tests
+# inputs: gemma-4-12b-it-qat-q4_0.gguf (google/gemma-4-12B-it-qat-q4_0-gguf) and
+# config.json, tokenizer.json, tokenizer_config.json, chat_template.jinja (google/gemma-4-12B-it)
+python converter/convert-gguf.py <dir>/gemma-4-12b-it-qat-q4_0.gguf gemma4_12b_it
+python converter/convert-tokenizer-hf.py <dir> gemma4_12b_it
+mkdir -p models/gemma4_12b_it_q40 && mv dllama_model_gemma4_12b_it_q40.m dllama_tokenizer_gemma4_12b_it.t models/gemma4_12b_it_q40/
+./dllama inference --model models/gemma4_12b_it_q40/dllama_model_gemma4_12b_it_q40.m \
+  --tokenizer models/gemma4_12b_it_q40/dllama_tokenizer_gemma4_12b_it.t \
+  --buffer-float-type q80 --nthreads 8 --max-seq-len 512 --temperature 0 --steps 73 \
+  --prompt "$(printf '<|turn>user\nWhat is the capital of France? Answer in one sentence.<turn|>\n<|turn>model\n<|channel>thought\n<channel|>')"
+```
+
+The three validation prompts use that exact chat wrapping (the canonical template with
+thinking disabled appends an empty `<|channel>thought\n<channel|>` block) with the user
+texts listed in the table; llama.cpp was run with `llama-simple`-style greedy sampling
+(`llama_sampler_init_greedy`, `llama_tokenize(..., add_special=true, parse_special=true)`)
+on the same prompt strings. `nn-cpu-test` covers the windowed attention (incl. the
+replicated-KV head offset), partial rotary rope, softcap, scalar multiply and merge-set
+kernels against straightforward references.
 
 ## Not supported
 
