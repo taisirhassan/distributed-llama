@@ -102,6 +102,26 @@ Read from `modeling_gemma4.py` (`Gemma4TextDecoderLayer`, `Gemma4TextRouter`,
   per llama.cpp's `is_moe_layer = ffn_gate_inp != nullptr`), and reuse
   `N_EXPERTS` / `N_ACTIVE_EXPERTS`.
 
+## Validation (MacBook Pro M3 Pro, 19 GB RAM, 1 node, CPU)
+
+`google/gemma-4-12B-it-qat-q4_0-gguf` converted with `converter/convert-gguf.py`
+(10,727,120,256 bytes: 4.0 GB F32 embedding + 6.7 GB Q4_0), tokenizer from the HF
+`tokenizer.json`. llama.cpp (a894dae, CPU, greedy) on the same GGUF versus
+`dllama inference --temperature 0 --buffer-float-type q80 --max-seq-len 512`, three
+chat prompts, comparing generated tokens up to llama.cpp's end-of-turn:
+
+| Prompt | llama.cpp tokens | identical |
+|---|---|---|
+| "What is the capital of France? Answer in one sentence." | 8 | 8/8 |
+| "Write a haiku about the ocean." | 21 | 21/21 |
+| "List three prime numbers greater than 10 and explain briefly why they are prime." | 48 | 48/48 |
+
+Prompt tokenization is identical to HF `tokenizers` for these prompts. Throughput on
+this Mac with 8 threads: 4.7 tokens/s generation (211 ms/token), 12.3 tokens/s prompt
+evaluation; the machine was swapping (the F32 embedding table alone is 4 GB), so these
+numbers are a lower bound. `nn-cpu-test` covers the windowed attention, partial rotary
+rope, softcap, scalar multiply and merge-set kernels.
+
 ## Not supported
 
 * Vulkan for GEMMA4 (`OP_SOFTCAP`, `OP_MERGE_SET`, `OP_SCALAR_MUL`, `OP_GELU` have no
