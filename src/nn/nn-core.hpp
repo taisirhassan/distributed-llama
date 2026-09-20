@@ -91,6 +91,7 @@ enum NnOpCode {
     OP_MOE_GATE,
     OP_MERGE_SET,
     OP_SOFTCAP,
+    OP_SCALAR_MUL,
 };
 
 enum NnOpQuantType {
@@ -105,7 +106,7 @@ enum NnOpQuantType {
     Q80_F32_F32,
 };
 
-#define N_OP_CODES (OP_SOFTCAP + 1)
+#define N_OP_CODES (OP_SCALAR_MUL + 1)
 #define N_OP_QUANTS (Q80_F32_F32 + 1)
 
 enum NnPointerSource {
@@ -294,6 +295,10 @@ typedef struct {
 typedef struct {
     float cap; // output = cap * tanh(input / cap)
 } NnSoftcapOpCodeConfig;
+
+typedef struct {
+    // empty; output = input * weight[0], the weight is a single F32 value (Gemma 4 layer_scalar)
+} NnScalarMulOpCodeConfig;
 
 // utility functions
 

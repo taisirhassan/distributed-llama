@@ -289,6 +289,35 @@ static void testSoftcap() {
     printOk("softcap");
 }
 
+static void testScalarMul() {
+    const float scale = 0.05444f;
+    NnNetConfigBuilder netBuilder(1, N_BATCHES);
+    const NnUint xPipeIndex = netBuilder.addPipe("X", size2D(F_32, N_BATCHES, DIM));
+    NnNodeConfigBuilder nodeBuilder(0);
+    NnSegmentConfigBuilder segmentBuilder;
+    segmentBuilder.addOp(OP_SCALAR_MUL, "scalar_mul", 0,
+        pointerBatchConfig(SRC_PIPE, xPipeIndex),
+        pointerBatchConfig(SRC_PIPE, xPipeIndex),
+        size1D(F_32, 1),
+        NnScalarMulOpCodeConfig{});
+
+    OpRunner runner(netBuilder, nodeBuilder, segmentBuilder, 2);
+    runner.executor->loadWeight("scalar_mul", 0u, 0u, sizeof(float), (NnByte *)&scale);
+    float *x = (float *)runner.execution->pipes[xPipeIndex];
+    std::vector<float> input(N_BATCHES * DIM);
+    for (NnUint i = 0; i < N_BATCHES * DIM; i++) {
+        input[i] = pseudoRandom(900 + i);
+        x[i] = input[i];
+    }
+
+    runner.execution->setBatchSize(N_BATCHES);
+    runner.executor->forward();
+
+    for (NnUint i = 0; i < N_BATCHES * DIM; i++)
+        assertClose("scalar_mul", x[i], input[i] * scale, 1e-6f);
+    printOk("scalar_mul");
+}
+
 // OP_MERGE_SET: output = sum of the node slices (no residual), for F32 and Q80 inputs
 static void testMergeSet(NnFloatType inputType) {
     const NnUint nSlices = 3;
@@ -355,6 +384,7 @@ int main() {
     testRopePartial(4, 2);
 
     testSoftcap();
+    testScalarMul();
     testMergeSet(F_32);
     testMergeSet(F_Q80);
     return 0;

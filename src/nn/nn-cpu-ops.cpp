@@ -1427,6 +1427,27 @@ static void softcapForward_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint b
     }
 }
 
+static void initScalarMulForward(NnCpuOpContext *context) {
+    ASSERT_EQ(context->weightSize.floatType, F_32);
+    ASSERT_EQ(context->weightSize.x, 1u);
+    ASSERT_EQ(context->weightSize.y, 1u);
+    ASSERT_EQ(context->weightSize.z, 1u);
+    ASSERT_EQ(context->inputSize.x, context->outputSize.x);
+    ASSERT_EQ(context->inputSize.y, context->outputSize.y);
+    ASSERT_EQ(context->inputSize.z, context->outputSize.z);
+}
+
+static void scalarMulForward_F32_F32_F32(NnUint nThreads, NnUint threadIndex, NnUint batchSize, NnCpuOpContext *context) {
+    const float s = ((const float *)context->weight)[0];
+
+    for (NnUint z = 0u; z < context->inputSize.z; z++) {
+        for (NnUint y = 0u; y < batchSize; y++) {
+            const NnUint index = z * context->inputSize.y + y;
+            scale_F32((const float *)context->input[index], (float *)context->output[index], s, context->inputSize.x, nThreads, threadIndex);
+        }
+    }
+}
+
 static void initCastForward(NnCpuOpContext *context) {
     ASSERT_EQ(context->inputSize.x, context->outputSize.x);
     ASSERT_EQ(context->inputSize.y, context->outputSize.y);
@@ -1640,6 +1661,8 @@ NnCpuOpForwardInit getCpuOpForwardInit(NnOpCode code, NnOpQuantType quantType) {
         return initMergeSetForward;
     if (code == OP_SOFTCAP)
         return initSoftcapForward;
+    if (code == OP_SCALAR_MUL)
+        return initScalarMulForward;
     return nullptr;
 }
 
@@ -1708,6 +1731,9 @@ NnCpuOpForward getCpuOpForward(NnOpCode code, NnOpQuantType quantType) {
     }
     if (code == OP_SOFTCAP) {
         if (quantType == F32_F32_F32) return softcapForward_F32_F32;
+    }
+    if (code == OP_SCALAR_MUL) {
+        if (quantType == F32_F32_F32) return scalarMulForward_F32_F32_F32;
     }
     return nullptr;
 }

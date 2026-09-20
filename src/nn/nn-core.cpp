@@ -90,6 +90,7 @@ const char *opCodeToString(NnOpCode code) {
     if (code == OP_MOE_GATE) return "MOE_GATE";
     if (code == OP_MERGE_SET) return "MERGE_SET";
     if (code == OP_SOFTCAP) return "SOFTCAP";
+    if (code == OP_SCALAR_MUL) return "SCALAR_MUL";
     throw std::invalid_argument("Unknown op code: " + std::to_string(code));
 }
 

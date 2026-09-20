@@ -380,9 +380,15 @@ static LlmNet buildGemma4LlmNet(LlmHeader *h, NnUint nNodes, NnUint nBatches) {
                     size0(),
                     NnCastOpCodeConfig{});
             } else {
-                // post_feedforward_layernorm of the previous layer + residual
+                // post_feedforward_layernorm of the previous layer + residual, then its layer_scalar
                 addGemma4PostNormOps(att, "block_norm_post_ff", layerIndex - 1,
                     zqPipeIndex, yBufferIndex, xBufferIndex, invRmsBufferIndex, n.rmsNormSize, h->normEpsilon);
+                att.addOp(
+                    OP_SCALAR_MUL, "block_layer_scale", layerIndex - 1,
+                    pointerBatchConfig(SRC_BUFFER, xBufferIndex),
+                    pointerBatchConfig(SRC_BUFFER, xBufferIndex),
+                    size1D(F_32, 1),
+                    NnScalarMulOpCodeConfig{});
             }
 
             // input_layernorm
@@ -554,6 +560,12 @@ static LlmNet buildGemma4LlmNet(LlmHeader *h, NnUint nNodes, NnUint nBatches) {
         NnSegmentConfigBuilder end;
         addGemma4PostNormOps(end, "block_norm_post_ff", h->nLayers - 1,
             zqPipeIndex, yBufferIndex, xBufferIndex, invRmsBufferIndex, n.rmsNormSize, h->normEpsilon);
+        end.addOp(
+            OP_SCALAR_MUL, "block_layer_scale", h->nLayers - 1,
+            pointerBatchConfig(SRC_BUFFER, xBufferIndex),
+            pointerBatchConfig(SRC_BUFFER, xBufferIndex),
+            size1D(F_32, 1),
+            NnScalarMulOpCodeConfig{});
         addRmsNormOps(end, "final_norm_pre", "final_norm", 0,
             xBufferIndex, yBufferIndex, invRmsBufferIndex, n.rmsNormSize, 1, h->normEpsilon);
         if (yBufferIndex != yqBufferIndex) {
@@ -1095,6 +1107,7 @@ static void loadGemma4LlmNetWeight(LlmNet *net, NnRootWeightLoader *loader, NnBy
         b += loader->loadAll("block_norm_post_att", layerIndex, net->rmsNormSize.nBytes, b);
         b += loader->loadAll("block_norm_1", layerIndex, net->rmsNormSize.nBytes, b);
         b += loader->loadAll("block_norm_post_ff", layerIndex, net->rmsNormSize.nBytes, b);
+        b += loader->loadAll("block_layer_scale", layerIndex, sizeof(float), b);
 
         if (timer.elapsedMiliseconds() > 10000)
             printf("💿 Loaded %u/%u\n", layerIndex + 1, h->nLayers);

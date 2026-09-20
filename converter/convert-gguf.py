@@ -306,10 +306,11 @@ class Gemma4Writer:
             self.__writeF32Tensor(b + 'ffn_norm.weight', (dim,))
             self.__writeF32Tensor(b + 'post_ffw_norm.weight', (dim,))
 
+            # layer_scalar: the residual stream is multiplied by this scalar at the end of every block
             if self.gguf.has(b + 'layer_output_scale.weight'):
-                scale = np.array(self.gguf.tensor(b + 'layer_output_scale.weight').data, dtype=np.float32).reshape(-1)
-                if not np.all(scale == 1.0):
-                    raise Exception(f'Layer {l}: layer_output_scale != 1.0 is not supported: {scale}')
+                self.__writeF32Tensor(b + 'layer_output_scale.weight', (1,))
+            else:
+                self.__writeF32(b + 'layer_output_scale (ones)', np.ones(1, dtype=np.float32))
 
         self.__writeF32Tensor('output_norm.weight', (dim,))
         self.__writeTiedLmHead()

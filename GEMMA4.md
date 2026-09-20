@@ -22,7 +22,7 @@ Reference implementations checked: HF `transformers` `modeling_gemma4.py` /
 | `attention_k_eq_v` | full layers have **no `v_proj`**: `V = v_norm(k_proj(x))` (pre-`k_norm`) | engine: copy `k_temp` to `v_temp` before the K norm on full layers; converter writes no V for those layers |
 | Activation | `gelu_pytorch_tanh` | existing `OP_GELU` (tanh approximation) |
 | Final logits | `30 * tanh(logits / 30)` | header `FINAL_LOGIT_SOFTCAP`; engine `OP_SOFTCAP` |
-| `layer_scalar` | present in the GGUF as `layer_output_scale` | converter asserts it is 1.0 and drops it |
+| `layer_scalar` | `hidden_states *= layer_scalar` at the end of every block (GGUF `layer_output_scale`, values 0.0037 to 0.9 in the 12B, so it cannot be dropped) | engine `OP_SCALAR_MUL` with a 1-element weight, applied after the post-FFN residual add |
 | Per-layer embeddings, MoE, kv-shared layers | not present in 12B (`hidden_size_per_layer_input = 0`, `num_kv_shared_layers = 0`) | rejected by the converter |
 | Rope style | NeoX / `rotate_half` (pairs `(j, j + head_dim/2)`) | existing `ROPE_FALCON` kernel |
 
@@ -58,7 +58,7 @@ Arch type: `GEMMA4 = 0xABCD03`.
 
 `q`, `k`, [`v` (sliding layers only)], `wo`, `w1` (gate), `w2` (down), `w3` (up),
 `q_norm`, `k_norm`, `v_norm` (ones), `norm_0` (input), `norm_post_att`,
-`norm_1` (pre-ff), `norm_post_ff`; then `final_norm`, `wcls`.
+`norm_1` (pre-ff), `norm_post_ff`, `layer_scale` (1 float); then `final_norm`, `wcls`.
 
 ## Source of weights
 
@@ -104,8 +104,8 @@ Read from `modeling_gemma4.py` (`Gemma4TextDecoderLayer`, `Gemma4TextRouter`,
 
 ## Not supported
 
-* Vulkan for GEMMA4 (`OP_SOFTCAP`, `OP_MERGE_SET`, `OP_GELU` have no shaders; the
-  app refuses `--gpu-index` for this arch).
+* Vulkan for GEMMA4 (`OP_SOFTCAP`, `OP_MERGE_SET`, `OP_SCALAR_MUL`, `OP_GELU` have no
+  shaders; the app refuses `--gpu-index` for this arch).
 * Multimodal (vision/audio towers are skipped), MoE variants (26B-A4B), per-layer
   embeddings (E2B/E4B).
 * Tokenizer: dllama's greedy best-score merge is driven by scores derived from the
